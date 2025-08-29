@@ -12,7 +12,7 @@ start_router() {
     local network=$4
     
     echo "Iniciando $name na porta $port..."
-    python roteador.py -p $port -f $config --network $network --interval 5 &
+    python3 roteador.py -p $port -f $config --network $network --interval 5 &
     sleep 2
 }
 

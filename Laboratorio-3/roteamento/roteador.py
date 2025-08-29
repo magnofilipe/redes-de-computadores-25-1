@@ -65,6 +65,8 @@ def summarize_routes(routing_table):
     # Agrupa rotas por next_hop
     routes_by_next_hop = {}
     for network, route_info in summarized_table.items():
+        if '/' not in network:
+            continue
         next_hop = route_info['next_hop']
         if next_hop not in routes_by_next_hop:
             routes_by_next_hop[next_hop] = []
@@ -175,20 +177,31 @@ class Router:
 
     def send_updates_to_neighbors(self):
         """
-        Envia a tabela de roteamento (potencialmente sumarizada) para todos os vizinhos.
+        Envia a tabela de roteamento para todos os vizinhos, aplicando
+        a regra do Split Horizon.
         """
-        # Aplica sumarização na cópia da tabela
-        tabela_para_enviar = summarize_routes(self.routing_table)
-
-        payload = {
-            "sender_address": self.my_address,
-            "routing_table": tabela_para_enviar
-        }
-
         for neighbor_address in self.neighbors:
+            # 1. Cria uma tabela personalizada para este vizinho específico
+            tabela_personalizada = {}
+            for network, route_info in self.routing_table.items():
+                # A REGRA DO SPLIT HORIZON:
+                # Só adiciona a rota na atualização se o próximo salto NÃO for o vizinho
+                # para quem estamos enviando a mensagem.
+                if route_info['next_hop'] != neighbor_address:
+                    tabela_personalizada[network] = route_info
+            
+            # 2. Aplica sumarização na tabela já filtrada pelo Split Horizon
+            tabela_para_enviar = summarize_routes(tabela_personalizada)
+
+            payload = {
+                "sender_address": self.my_address,
+                "routing_table": tabela_para_enviar
+            }
+
             url = f'http://{neighbor_address}/receive_update'
             try:
-                print(f"Enviando tabela para {neighbor_address}")
+                # 3. Envia a tabela personalizada para o vizinho correto
+                print(f"Enviando tabela (com Split Horizon) para {neighbor_address}")
                 requests.post(url, json=payload, timeout=5)
             except requests.exceptions.RequestException as e:
                 print(f"Não foi possível conectar ao vizinho {neighbor_address}. Erro: {e}")
@@ -241,6 +254,9 @@ def receive_update():
     
     # Processa cada rota na tabela recebida
     for network, route_info in sender_table.items():
+
+        if network == router_instance.my_address:
+            continue
         # Calcula o novo custo para chegar à rede através deste vizinho
         new_cost = direct_link_cost + route_info['cost']
         
