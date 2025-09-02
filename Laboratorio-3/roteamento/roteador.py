@@ -180,6 +180,10 @@ class Router:
         Envia a tabela de roteamento para todos os vizinhos, aplicando
         a regra do Split Horizon.
         """
+
+        time.sleep(3)
+
+        dead_neighbors = []
         for neighbor_address in self.neighbors:
             # 1. Cria uma tabela personalizada para este vizinho específico
             tabela_personalizada = {}
@@ -202,9 +206,37 @@ class Router:
             try:
                 # 3. Envia a tabela personalizada para o vizinho correto
                 print(f"Enviando tabela (com Split Horizon) para {neighbor_address}")
+
+
                 requests.post(url, json=payload, timeout=5)
             except requests.exceptions.RequestException as e:
+                if "HTTPConnectionPool" in str(e):
+                    porta = neighbor_address.split(':')[-1]
+                    print(f"Roteador na porta {porta} está offline")
+                    dead_neighbors.append(neighbor_address)
+
                 print(f"Não foi possível conectar ao vizinho {neighbor_address}. Erro: {e}")
+
+        for dead_neighbor in dead_neighbors:
+            if dead_neighbor in self.neighbors:
+                
+                # Remove a entrada do vizinho morto da tabela de roteamento
+                if dead_neighbor in self.routing_table:
+                    print(f"Removendo entrada do vizinho morto da tabela: {dead_neighbor}")
+                    del self.routing_table[dead_neighbor]
+                
+                # Remove também rotas que dependem deste vizinho
+                routes_to_remove = []
+                for network, route_info in self.routing_table.items():
+
+                    if (route_info['next_hop'] == dead_neighbor and 
+                        network != dead_neighbor and 
+                        network not in self.neighbors):
+                        routes_to_remove.append(network)
+                
+                for network in routes_to_remove:
+                    print(f"Removendo rota órfã: {network}")
+                    del self.routing_table[network]
 
 # --- API Endpoints ---
 # Instância do Flask e do Roteador (serão inicializadas no main)
@@ -290,6 +322,7 @@ def receive_update():
         print(json.dumps(router_instance.routing_table, indent=4))
     else:
         print("Tabela de roteamento não mudou")
+        print(json.dumps(router_instance.routing_table, indent=4))
 
     return jsonify({"status": "success", "message": "Update received"}), 200
 
