@@ -112,6 +112,29 @@ def summarize_routes(routing_table):
     
     return summarized_table
 
+def is_subnet(subnet_str, network_str):
+    """Verifica se subnet_str é uma sub-rede de network_str."""
+    try:
+        ip_sub, prefix_sub = parse_network(subnet_str)
+        ip_net, prefix_net = parse_network(network_str)
+
+        # Uma sub-rede deve ter um prefixo maior (mais específico)
+        if prefix_sub <= prefix_net:
+            return False
+
+        # Converte IPs para inteiros
+        ip_sub_int = ip_to_int(ip_sub)
+        ip_net_int = ip_to_int(ip_net)
+
+        # Cria a máscara de rede para a rede maior (network_str)
+        mask_net = ((1 << 32) - 1) << (32 - prefix_net)
+
+        # Verifica se o endereço de rede de ambos é o mesmo quando a máscara maior é aplicada
+        return (ip_sub_int & mask_net) == (ip_net_int & mask_net)
+    except (ValueError, IndexError):
+        # Retorna False se o formato for inválido (ex: '127.0.0.1:5001')
+        return False
+
 class Router:
     """
     Representa um roteador que executa o algoritmo de Vetor de Distância.
@@ -139,7 +162,8 @@ class Router:
         # Adiciona a rota para a rede local (custo 0)
         self.routing_table[self.my_network] = {
             'cost': 0,
-            'next_hop': self.my_network
+            'next_hop': self.my_network,
+            'timestamp': time.time()
         }
         
         # Adiciona as rotas para os vizinhos diretos
@@ -150,7 +174,8 @@ class Router:
             # as informações deles
             self.routing_table[neighbor_address] = {
                 'cost': cost,
-                'next_hop': neighbor_address
+                'next_hop': neighbor_address,
+                'timestamp': time.time()
             }
 
         print("Tabela de roteamento inicial:")
@@ -158,6 +183,38 @@ class Router:
 
         # Inicia o processo de atualização periódica em uma thread separada
         self._start_periodic_updates()
+
+        timeout_thread = threading.Thread(target=self._check_route_timeouts)
+        timeout_thread.daemon = True
+        timeout_thread.start()
+
+    def _check_route_timeouts(self):
+        """Verifica e remove rotas expiradas periodicamente."""
+        # Define o timeout como 4 vezes o intervalo de atualização
+        TIMEOUT_DURATION = self.update_interval * 4
+
+        while True:
+            time.sleep(TIMEOUT_DURATION)
+
+            # Cria uma cópia das chaves para poder modificar o dicionário
+            routes_to_check = list(self.routing_table.keys())
+            table_changed = False
+
+            for network in routes_to_check:
+                # Não remove a rota para a própria rede local
+                if self.routing_table[network]['cost'] == 0:
+                    continue
+
+                route_age = time.time() - self.routing_table[network]['timestamp']
+
+                if route_age > TIMEOUT_DURATION:
+                    print(f"INFO: Rota para {network} expirou (sem atualizações). Removendo.")
+                    del self.routing_table[network]
+                    table_changed = True
+
+            if table_changed:
+                print("Nova tabela de roteamento após timeouts:")
+                print(json.dumps(self.routing_table, indent=4))
 
     def _start_periodic_updates(self):
         """Inicia uma thread para enviar atualizações periodicamente."""
@@ -177,66 +234,27 @@ class Router:
 
     def send_updates_to_neighbors(self):
         """
-        Envia a tabela de roteamento para todos os vizinhos, aplicando
-        a regra do Split Horizon.
+        Envia a tabela de roteamento para todos os vizinhos.
+        Esta versão NÃO usa Split Horizon, para permitir a simulação de falhas.
         """
+        # Aplica sumarização na cópia da tabela
+        tabela_para_enviar = summarize_routes(self.routing_table)
 
-        time.sleep(3)
+        payload = {
+            "sender_address": self.my_address,
+            "routing_table": tabela_para_enviar
+        }
 
-        dead_neighbors = []
         for neighbor_address in self.neighbors:
-            # 1. Cria uma tabela personalizada para este vizinho específico
-            tabela_personalizada = {}
-            for network, route_info in self.routing_table.items():
-                # A REGRA DO SPLIT HORIZON:
-                # Só adiciona a rota na atualização se o próximo salto NÃO for o vizinho
-                # para quem estamos enviando a mensagem.
-                if route_info['next_hop'] != neighbor_address:
-                    tabela_personalizada[network] = route_info
-            
-            # 2. Aplica sumarização na tabela já filtrada pelo Split Horizon
-            tabela_para_enviar = summarize_routes(tabela_personalizada)
-
-            payload = {
-                "sender_address": self.my_address,
-                "routing_table": tabela_para_enviar
-            }
-
             url = f'http://{neighbor_address}/receive_update'
             try:
-                # 3. Envia a tabela personalizada para o vizinho correto
-                print(f"Enviando tabela (com Split Horizon) para {neighbor_address}")
-
-
+                # Não precisa mais imprimir aqui, para manter o log limpo
+                # print(f"Enviando tabela para {neighbor_address}")
                 requests.post(url, json=payload, timeout=5)
-            except requests.exceptions.RequestException as e:
-                if "HTTPConnectionPool" in str(e):
-                    porta = neighbor_address.split(':')[-1]
-                    print(f"Roteador na porta {porta} está offline")
-                    dead_neighbors.append(neighbor_address)
-
-                print(f"Não foi possível conectar ao vizinho {neighbor_address}. Erro: {e}")
-
-        for dead_neighbor in dead_neighbors:
-            if dead_neighbor in self.neighbors:
-                
-                # Remove a entrada do vizinho morto da tabela de roteamento
-                if dead_neighbor in self.routing_table:
-                    print(f"Removendo entrada do vizinho morto da tabela: {dead_neighbor}")
-                    del self.routing_table[dead_neighbor]
-                
-                # Remove também rotas que dependem deste vizinho
-                routes_to_remove = []
-                for network, route_info in self.routing_table.items():
-
-                    if (route_info['next_hop'] == dead_neighbor and 
-                        network != dead_neighbor and 
-                        network not in self.neighbors):
-                        routes_to_remove.append(network)
-                
-                for network in routes_to_remove:
-                    print(f"Removendo rota órfã: {network}")
-                    del self.routing_table[network]
+            except requests.exceptions.RequestException:
+                # Para o experimento de falha, é melhor simplesmente ignorar
+                # os erros de conexão com o roteador que foi derrubado.
+                pass
 
 # --- API Endpoints ---
 # Instância do Flask e do Roteador (serão inicializadas no main)
@@ -289,6 +307,11 @@ def receive_update():
 
         if network == router_instance.my_address:
             continue
+
+        if is_subnet(router_instance.my_network, network):
+            print(f"INFO: Ignorando rota sumarizada '{network}' de {sender_address} pois contém minha rede local.")
+            continue
+
         # Calcula o novo custo para chegar à rede através deste vizinho
         new_cost = direct_link_cost + route_info['cost']
         
@@ -303,7 +326,8 @@ def receive_update():
                 if new_cost != current_cost or current_next_hop != sender_address:
                     router_instance.routing_table[network] = {
                         'cost': new_cost,
-                        'next_hop': sender_address
+                        'next_hop': sender_address,
+                        'timestamp': time.time()
                     }
                     table_changed = True
                     print(f"Rota atualizada: {network} -> custo {new_cost} via {sender_address}")
@@ -311,7 +335,8 @@ def receive_update():
             # Nova rede descoberta
             router_instance.routing_table[network] = {
                 'cost': new_cost,
-                'next_hop': sender_address
+                'next_hop': sender_address,
+                'timestamp': time.time()
             }
             table_changed = True
             print(f"Nova rota descoberta: {network} -> custo {new_cost} via {sender_address}")
