@@ -7,8 +7,6 @@ echo "=== Testando Topologia Tree - Grupo 7 ==="
 echo "Iniciando 12 roteadores em terminais separados..."
 echo ""
 
-cd ..
-
 # Função para iniciar um roteador em background
 start_router() {
     local router_num=$1
